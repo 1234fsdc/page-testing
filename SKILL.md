@@ -9,7 +9,7 @@ description: >
 
 # dev-scanner — 项目浏览器全自动扫描器
 
-全自动浏览器扫描工具。对项目做 8 个维度的全方位检查，输出结构化审计报告。
+全自动浏览器扫描工具。对项目做 9 个维度的全方位检查，输出结构化审计报告。
 
 使用 `browser-use` skill 进行浏览器操作，通过 CDP 控制 Chrome。
 
@@ -28,7 +28,7 @@ description: >
 ## 工作流程概览
 
 ```
-项目检测 → 路由发现 → 逐页扫描（8个维度） → 报告生成
+项目检测 → 路由发现 → 数据模型分析 → 写入测试数据 → 模拟真实用户操作 → 逐页扫描（9个维度） → 报告生成
 ```
 
 ---
@@ -78,11 +78,337 @@ find pages -name "*.vue" 2>/dev/null
 📋 发现 {N} 个页面路由
 ❌ 排除路由：/admin/settings, /api/...
 🔑 是否需要登录？(是/否)
+🧪 是否写入测试数据模拟真实用户？(是/否)
+```
+
+### 1.4 分析项目数据模型
+
+扫描前先理解项目的数据结构，为后续写入测试数据做准备。
+
+**读取状态管理文件**：
+```bash
+# Vue (Pinia/Vuex)
+cat src/stores/*.js src/stores/*.ts 2>/dev/null
+# React (Redux/Zustand/Context)
+cat src/store/*.js src/store/*.ts src/context/*.js src/context/*.ts 2>/dev/null
+# 查找数据模型/类型定义
+find src -name "*.d.ts" -o -name "types.ts" -o -name "models.ts" 2>/dev/null
+```
+
+**分析要点**：
+- 用户模型：有哪些字段？密码怎么存的？
+- 业务模型：商品/帖子/订单等核心数据结构
+- 关联关系：用户和商品之间是什么关系？有收藏/点赞吗？
+- 验证规则：必填字段？格式要求？长度限制？
+
+**记录到临时变量**，后续写入测试数据时使用。
+
+### 1.5 写入测试数据 + 模拟真实用户操作
+
+在扫描前，通过浏览器模拟真实用户行为，让项目进入"有数据"的状态。这样扫描时能看到真实的页面表现，而不是空态。
+
+#### 测试数据策略
+
+根据项目类型生成**大量、多样化**的测试数据，覆盖各种真实场景。
+
+**原则：宁多勿少。** 数据量要足以暴露分页、滚动、布局、性能等问题。
+
+##### 电商/二手市场类
+
+| 数据类型 | 数量 | 多样性要求 |
+|---------|------|-----------|
+| 测试用户 | 3 个 | 不同用户名长度（短/中/长）、不同密码强度 |
+| 商品 | 8-12 个 | 不同分类、不同价格区间（0/低价/中价/高价/超长数字）、不同标题长度（2字/20字/50字/100字）、有图/无图/多图 |
+| 商品描述 | 每商品 1 段 | 空/10字/200字/500字、含换行/含特殊字符/含 emoji |
+| 分类 | 覆盖所有分类 | 每个分类至少 2 个商品 |
+| 收藏 | 3-5 条 | 不同用户收藏不同商品 |
+
+```
+示例商品数据：
+1. 标题："iPhone" (2字) / 价格：1 → 测试极短标题
+2. 标题："九成新 MacBook Pro 2024 M3 Max 16寸 深空灰 官方在保" (25字) / 价格：12999 → 正常
+3. 标题："出一台用了半年的iPad，成色很好，配件齐全，有意私聊，不刀" (28字) / 价格：3500 → 含口语化表达
+4. 标题：100字重复文本 → 测试超长标题截断
+5. 价格：0 → 测试免费商品
+6. 价格：99999999 → 测试超长数字显示
+7. 描述：空 → 测试空态
+8. 描述：500字 Lorem ipsum + emoji 🎉📦 → 测试长文本 + 特殊字符
+9. 无图片商品 → 测试裂图/占位图
+10. 分类：每个可用分类各 1 个 → 测试分类筛选
+```
+
+##### 社交/论坛类
+
+| 数据类型 | 数量 | 多样性要求 |
+|---------|------|-----------|
+| 测试用户 | 3-5 个 | 不同昵称长度、有/无头像 |
+| 帖子 | 10-15 条 | 不同分类、不同字数、含图/不含图、置顶/非置顶 |
+| 评论 | 每帖 2-5 条 | 空评论/长评论/含 @ /含链接 |
+| 点赞 | 随机分布 | 不同帖子不同点赞数 |
+| 私信 | 2-3 条 | 空对话/长对话 |
+
+```
+示例帖子数据：
+1. 标题："求助" (2字) / 内容："怎么办" (3字) → 极短
+2. 标题：正常标题 / 内容：500字长文 → 正常
+3. 标题：含 emoji 🎉🔥💡 / 内容：含换行+列表 → 特殊字符
+4. 标题：含 HTML <b>粗体</b> → XSS 测试
+5. 标题：含 " OR 1=1 -- → SQL 注入测试
+6. 内容：空 → 测试空态
+7. 内容：2000字 → 测试超长内容滚动
+8. 每个分类至少 2 条 → 测试分类筛选
+9. 有图片的帖子 3 条 → 测试图片加载
+10. 无图片的帖子 7 条 → 测试无图布局
+```
+
+##### SaaS/后台管理类
+
+| 数据类型 | 数量 | 多样性要求 |
+|---------|------|-----------|
+| 管理员账号 | 2 个 | 超级管理员/普通管理员 |
+| 普通用户 | 5-8 个 | 不同状态（活跃/禁用/未验证） |
+| 业务数据 | 10-20 条 | 不同状态、不同时间、不同负责人 |
+| 仪表盘 | 各指标有数据 | 确保图表有内容可渲染 |
+
+```
+示例后台数据：
+1. 用户列表：8 个用户（不同注册时间、不同状态）
+2. 订单/记录：15 条（待处理/进行中/已完成/已取消 各几条）
+3. 通知/消息：5 条（已读/未读）
+4. 设置项：各类型都改一下（文本/数字/开关/下拉）
+5. 权限测试：普通用户访问管理员页面 → 检查权限控制
+```
+
+##### 内容/CMS 类
+
+| 数据类型 | 数量 | 多样性要求 |
+|---------|------|-----------|
+| 文章 | 8-12 篇 | 不同分类、不同长度、有/无封面图 |
+| 分类/标签 | 覆盖所有 | 每个分类至少 2 篇 |
+| 评论 | 每篇 2-3 条 | 正常/垃圾/含链接 |
+| 草稿 | 2-3 篇 | 测试草稿列表 |
+
+##### 工具类
+
+| 数据类型 | 数量 | 多样性要求 |
+|---------|------|-----------|
+| 各功能模块 | 每模块 3-5 条记录 | 正常/边界/空 |
+
+#### 写入方式：通过浏览器操作
+
+**不要直接写 localStorage/数据库**——通过浏览器表单操作来写入，这样同时测试了表单功能。
+
+```bash
+# 步骤 1：注册测试用户
+browser-use <<PY
+import time
+goto_url("http://localhost:PORT/register")
+time.sleep(3)
+
+# 填写注册表单
+js("""
+(() => {
+  // 找到所有 input 并填入值
+  const inputs = document.querySelectorAll('input');
+  inputs.forEach(i => {
+    if (i.type === 'text' && !i.value) {
+      i.value = 'testuser';
+      i.dispatchEvent(new Event('input', {bubbles: true}));
+    }
+    if (i.type === 'password' && !i.value) {
+      i.value = 'Test1234!';
+      i.dispatchEvent(new Event('input', {bubbles: true}));
+    }
+  });
+  // 触发提交
+  const btn = document.querySelector('button[type=submit]');
+  if (btn) btn.click();
+})()
+""")
+time.sleep(2)
+PY
+
+# 步骤 2：登录
+browser-use <<PY
+import time
+goto_url("http://localhost:PORT/login")
+time.sleep(3)
+
+js("""
+(() => {
+  const inputs = document.querySelectorAll('input');
+  inputs.forEach(i => {
+    if (i.type === 'text') {
+      i.value = 'testuser';
+      i.dispatchEvent(new Event('input', {bubbles: true}));
+    }
+    if (i.type === 'password') {
+      i.value = 'Test1234!';
+      i.dispatchEvent(new Event('input', {bubbles: true}));
+    }
+  });
+  const btn = document.querySelector('button[type=submit]');
+  if (btn) btn.click();
+})()
+""")
+time.sleep(2)
+PY
+
+# 步骤 3：发布商品/帖子（根据项目类型）
+browser-use <<PY
+import time
+goto_url("http://localhost:PORT/publish")
+time.sleep(3)
+
+js("""
+(() => {
+  // 通用：找到所有 textarea 和 input，填入测试数据
+  document.querySelectorAll('textarea').forEach(t => {
+    t.value = '这是一条测试数据，用于验证页面在有内容时的表现。';
+    t.dispatchEvent(new Event('input', {bubbles: true}));
+  });
+  document.querySelectorAll('input[type=text]').forEach(i => {
+    if (!i.value) {
+      i.value = '测试标题';
+      i.dispatchEvent(new Event('input', {bubbles: true}));
+    }
+  });
+  document.querySelectorAll('input[type=number]').forEach(i => {
+    i.value = '99';
+    i.dispatchEvent(new Event('input', {bubbles: true}));
+  });
+  // 提交
+  const btn = document.querySelector('button[type=submit]');
+  if (btn) btn.click();
+})()
+""")
+time.sleep(2)
+PY
+```
+
+#### 测试用户清单
+
+扫描过程中使用以下测试账号（如果项目需要登录）：
+
+| 用户名 | 密码 | 用途 |
+|--------|------|------|
+| testuser | Test1234! | 普通用户，测试核心功能 |
+| admin | Admin1234! | 管理员（如果项目有后台） |
+
+#### 边界条件测试
+
+在写入正常数据后，**必须**测试以下边界情况。每种情况单独测试，记录结果。
+
+##### 表单验证边界
+
+| 测试场景 | 输入 | 预期行为 | 检查方式 |
+|---------|------|---------|---------|
+| 空提交 | 所有字段留空，点提交 | 显示验证错误 | 检查 `.error` / `[role=alert]` 是否出现 |
+| 仅空格 | 输入全空格 `"   "` | 视为空 / trim 后验证 | 检查是否 trim |
+| 最小长度 | 输入 1 个字符 | 如果有最小长度限制应报错 | 对比规则 |
+| 最大长度 | 输入 500+ 字符 | 截断 / 报错 / 正常 | 检查是否溢出 |
+| 重复字段值 | 两次输入不同值 | 如"确认密码"应报不一致 | 检查错误提示 |
+| 数字边界 | 价格输入 0 / -1 / 99999999 / 小数 | 根据业务规则验证 | 检查结果 |
+
+##### 安全边界
+
+| 测试场景 | 输入 | 预期行为 | 检查方式 |
+|---------|------|---------|---------|
+| XSS | `<script>alert(1)</script>` | 转义或拒绝 | 检查是否弹窗 / DOM 中是否保留标签 |
+| HTML 注入 | `<img src=x onerror=alert(1)>` | 转义或拒绝 | 检查 DOM |
+| SQL 注入 | `' OR 1=1 --` | 不影响查询 | 检查是否报错 |
+| 超长 URL | `/products/` + 2000 字符 | 404 / 截断 / 正常 | 检查响应 |
+| 特殊路径 | `/products/../../../etc/passwd` | 404 / 拒绝 | 检查响应 |
+
+##### 交互边界
+
+| 测试场景 | 操作 | 预期行为 | 检查方式 |
+|---------|------|---------|---------|
+| 快速重复点击 | 连续点击提交按钮 5 次 | 不重复创建 / 防抖 | 检查数据条数 |
+| 浏览器前进/后退 | 操作后点后退按钮 | 页面状态正确 | 检查页面内容 |
+| 刷新页面 | 操作后刷新 | 数据保持 / 状态正确 | 检查数据 |
+| 网络断开模拟 | 提交时断网 | 有错误提示 / 不静默失败 | 检查错误处理 |
+| 未登录操作 | 退出后访问受保护页 | 跳转登录页 | 检查 URL |
+
+##### 内容边界
+
+| 测试场景 | 输入 | 预期行为 | 检查方式 |
+|---------|------|---------|---------|
+| 纯 emoji | 🎉🔥💡📦 | 正常显示 | 检查渲染 |
+| 混合语言 | "Hello 你好 ハロorld" | 正常显示 | 检查渲染 |
+| RTL 文字 | "مرحبا" | 正常显示 / 不破坏布局 | 检查布局 |
+| 换行/制表符 | 含 `\n` `\t` 的文本 | 正确渲染 | 检查 DOM |
+| 零宽字符 | `\u200B\u200C\u200D` | 不影响显示 | 检查布局 |
+| HTML 实体 | `&amp; &lt; &gt;` | 正确转义显示 | 检查渲染 |
+
+```bash
+# 边界条件测试完整示例
+browser-use <<PY
+import time, json
+
+goto_url("http://localhost:PORT/publish")
+time.sleep(3)
+
+results = []
+
+# 1. 空提交
+js("document.querySelector('button[type=submit]')?.click()")
+time.sleep(1)
+error = js("document.querySelector('.error, .form-message, [role=alert]')?.textContent || '无'")
+results.append({"test": "空提交", "error_hint": error})
+
+# 2. 超长文本
+js("""
+(() => {
+  const ta = document.querySelector('textarea');
+  if (ta) { ta.value = 'A'.repeat(500); ta.dispatchEvent(new Event('input', {bubbles:true})); }
+  const ti = document.querySelector('input[type=text]');
+  if (ti) { ti.value = 'B'.repeat(100); ti.dispatchEvent(new Event('input', {bubbles:true})); }
+})()
+""")
+time.sleep(1)
+overflow = js("document.documentElement.scrollWidth > document.documentElement.clientWidth")
+results.append({"test": "超长文本", "overflow": overflow})
+
+# 3. XSS
+js("""
+(() => {
+  const ta = document.querySelector('textarea');
+  if (ta) { ta.value = '<script>alert(1)</script>'; ta.dispatchEvent(new Event('input', {bubbles:true})); }
+})()
+""")
+time.sleep(1)
+has_script = js("document.body.innerHTML.includes('<script>alert(1)</script>')")
+results.append({"test": "XSS", "raw_html": has_script})
+
+# 4. 特殊字符
+js("""
+(() => {
+  const ta = document.querySelector('textarea');
+  if (ta) { ta.value = '🎉🔥 "quotes" \\backslash\\ <html>'; ta.dispatchEvent(new Event('input', {bubbles:true})); }
+})()
+""")
+time.sleep(1)
+rendered = js("document.querySelector('textarea')?.value || '无'")
+results.append({"test": "特殊字符", "rendered": rendered})
+
+print(json.dumps(results, ensure_ascii=False, indent=2))
+PY
+```
+
+#### 清理测试数据（可选）
+
+扫描完成后，询问用户是否清理测试数据：
+
+```
+🧹 扫描完成。是否清理刚才写入的测试数据？
+   - 清理：删除测试用户和测试商品
+   - 保留：保持现状
 ```
 
 ---
 
-## 阶段二：逐页全面扫描（8个维度）
+## 阶段二：逐页全面扫描（9个维度）
 
 对每个页面使用 browser-use 执行以下操作。
 
@@ -220,6 +546,31 @@ document.querySelector('link[rel="icon"]')
 // 自定义 404 检测（如果页面是 404）
 ```
 
+### 维度 G：真实用户操作验证
+
+**在写入测试数据后，验证数据是否正确渲染。** 这是前面"写入测试数据"的闭环检查。
+
+```bash
+# 验证测试数据是否出现在页面上
+browser-use <<PY
+import time
+goto_url("http://localhost:PORT/products")
+time.sleep(3)
+
+# 检查是否有商品卡片
+cards = js("document.querySelectorAll('[class*=card], [class*=product], [class*=item]').length")
+print(f"商品卡片数: {cards}")
+
+# 检查是否有测试数据的标题
+has_test = js("document.body.innerText.includes('测试标题')")
+print(f"包含测试数据: {has_test}")
+
+# 检查空态是否隐藏（有数据时不应显示空态）
+empty = js("document.querySelector('[class*=empty], [class*=no-data]')?.offsetHeight === 0")
+print(f"空态隐藏: {empty}")
+PY
+```
+
 ---
 
 ## 阶段三：报告生成
@@ -324,6 +675,17 @@ document.querySelector('link[rel="icon"]')
 | 级别 | 问题 | 位置 | 详细说明 |
 |------|------|------|----------|
 | 🔴 严重 | {问题} | `{文件}:{行号}` | {一句话详细说明} |
+
+---
+
+## 🧪 边界条件测试结果
+
+| 测试场景 | 结果 | 详情 |
+|---------|------|------|
+| 空提交验证 | ✅/❌ | {具体表现} |
+| 超长文本 | ✅/❌ | {是否溢出} |
+| XSS 防护 | ✅/❌ | {是否转义} |
+| 特殊字符 | ✅/❌ | {是否正常渲染} |
 
 ---
 
@@ -512,4 +874,4 @@ done
 4. **扫描中断**：如果扫描中途出错，已完成的页面仍然生成报告，在报告顶部注明"部分完成"
 5. **截图保存**：截图保存到 `audit-reports/screenshots/`，在报告中引用路径
 6. **增量扫描**：如果用户说"再扫一次"，对比前一次报告，只标注新增/修复的问题
-7. **不破坏环境**：扫描过程中不要修改项目代码，只读不写
+7. **不破坏环境**：扫描过程中不要修改项目代码，只读不写（测试数据通过浏览器写入，可选清理）
